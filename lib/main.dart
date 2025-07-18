@@ -1,10 +1,52 @@
 import 'package:flutter/material.dart';
 import 'package:lecture_reminder_system/presentation/screens/login_page/login_page.dart';
 import 'package:timezone/data/latest.dart' as tz;
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+
+final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
+    FlutterLocalNotificationsPlugin();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  tz.initializeTimeZones(); // Initialize timezone database for notifications
+
+  // Initialize timezone database
+  tz.initializeTimeZones();
+
+  // Initialize local notifications
+  const AndroidInitializationSettings androidInitSettings =
+      AndroidInitializationSettings('@mipmap/ic_launcher');
+
+  const InitializationSettings initializationSettings = InitializationSettings(
+    android: androidInitSettings,
+    iOS: DarwinInitializationSettings(
+      requestAlertPermission: true,
+      requestBadgePermission: true,
+      requestSoundPermission: true,
+    ),
+  );
+
+  await flutterLocalNotificationsPlugin.initialize(
+    initializationSettings,
+    onDidReceiveNotificationResponse: (NotificationResponse response) {
+      debugPrint('Notification tapped: ${response.payload}');
+    },
+  );
+
+  // Register notification channel (Android 8+)
+  final androidPlugin = flutterLocalNotificationsPlugin
+      .resolvePlatformSpecificImplementation<
+        AndroidFlutterLocalNotificationsPlugin
+      >();
+
+  const AndroidNotificationChannel channel = AndroidNotificationChannel(
+    'lecture_channel',
+    'Lecture Reminders',
+    description: 'Lecture schedule reminder',
+    importance: Importance.high,
+  );
+
+  await androidPlugin?.createNotificationChannel(channel);
+
   runApp(const LectureReminderApp());
 }
 
@@ -32,17 +74,7 @@ class LectureReminderApp extends StatelessWidget {
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(12),
             ),
-            backgroundBuilder: (context, states, child) => Container(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [Colors.blue.shade700, Colors.blue.shade400],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                ),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: child,
-            ),
+            backgroundColor: Colors.blue,
           ),
         ),
       ),

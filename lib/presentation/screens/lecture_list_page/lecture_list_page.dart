@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:lecture_reminder_system/main.dart';
 import 'package:lecture_reminder_system/model/lecture_model.dart';
 import 'package:lecture_reminder_system/presentation/screens/add_lecture_page/add_lecture_page.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -28,100 +29,68 @@ class _LectureListPageState extends State<LectureListPage> {
   }
 
   Future<void> _initializeNotifications() async {
-    tz.initializeTimeZones();
-    final localTimezone = tz.getLocation(
-      'Africa/Lagos',
-    ); // Explicitly set to WAT
-    tz.setLocalLocation(localTimezone);
-    debugPrint('Current timezone: ${tz.local.name}');
+    // Only set timezone once
+    final location = tz.getLocation('Africa/Lagos');
+    tz.setLocalLocation(location);
+    debugPrint('📍 Timezone set to: ${tz.local.name}');
 
-    const initializationSettingsAndroid = AndroidInitializationSettings(
-      '@mipmap/ic_launcher',
-    );
-    const initializationSettingsIOS = DarwinInitializationSettings(
-      requestAlertPermission: true,
-      requestBadgePermission: true,
-      requestSoundPermission: true,
-    );
-    const initializationSettings = InitializationSettings(
-      android: initializationSettingsAndroid,
-      iOS: initializationSettingsIOS,
-    );
-
-    final bool? initResult = await _notificationsPlugin.initialize(
-      initializationSettings,
-      onDidReceiveNotificationResponse: (NotificationResponse response) {
-        debugPrint(
-          'Notification triggered: ID=${response.id}, Payload=${response.payload}',
-        );
-      },
-    );
-    debugPrint(
-      'Notification initialization: ${initResult == true ? "Success" : "Failed or null"}',
-    );
-
-    // Clear all existing notifications to avoid conflicts
-    await _notificationsPlugin.cancelAll();
-    debugPrint('Cleared all existing notifications');
-
-    // Android permissions (Android 13+)
-    final androidPlugin = _notificationsPlugin
+    // Already initialized in main.dart, so no need to reinitialize here
+    // Request Android 13+ permissions
+    final androidPlugin = flutterLocalNotificationsPlugin
         .resolvePlatformSpecificImplementation<
           AndroidFlutterLocalNotificationsPlugin
         >();
+
     if (androidPlugin != null) {
-      final bool? notificationGranted = await androidPlugin
-          .requestNotificationsPermission();
+      final granted = await androidPlugin.requestNotificationsPermission();
+      final exactGranted = await androidPlugin.requestExactAlarmsPermission();
       debugPrint(
-        'Notification permission granted: ${notificationGranted == true}',
-      );
-      final bool? exactAlarmGranted = await androidPlugin
-          .requestExactAlarmsPermission();
-      debugPrint(
-        'Exact alarm permission: ${exactAlarmGranted == true ? "Granted" : "Denied or null"}',
+        '🔔 Notification permission: $granted | Exact alarms: $exactGranted',
       );
     }
 
     // iOS permissions
-    final iosPlugin = _notificationsPlugin
+    final iosPlugin = flutterLocalNotificationsPlugin
         .resolvePlatformSpecificImplementation<
           IOSFlutterLocalNotificationsPlugin
         >();
     if (iosPlugin != null) {
-      final bool? iosGranted = await iosPlugin.requestPermissions(
+      final granted = await iosPlugin.requestPermissions(
         alert: true,
         badge: true,
         sound: true,
       );
-      debugPrint('iOS notification permission granted: ${iosGranted == true}');
+      debugPrint('🍏 iOS permission granted: $granted');
     }
 
-    // Test notification (triggers 10 seconds from now)
-    final testDate = tz.TZDateTime.now(
-      tz.local,
-    ).add(const Duration(seconds: 10));
-    await _notificationsPlugin.zonedSchedule(
-      999,
-      'Test Notification',
-      'This is a test to verify notifications work.',
-      testDate,
-      const NotificationDetails(
-        android: AndroidNotificationDetails(
-          'lecture_channel',
-          'Lecture Reminders',
-          channelDescription: 'Lecture schedule reminder',
-          importance: Importance.max,
-          priority: Priority.high,
-          playSound: true,
-          enableVibration: true,
-        ),
-        iOS: DarwinNotificationDetails(),
-      ),
-      androidAllowWhileIdle: true,
-      uiLocalNotificationDateInterpretation:
-          UILocalNotificationDateInterpretation.absoluteTime,
-    );
-    debugPrint('Test notification scheduled for: $testDate');
+    // Schedule test notification in 10s
+    // final now = tz.TZDateTime.now(tz.local);
+    // final testDate = now.add(const Duration(seconds: 30)); // safer buffer
+    // final diff = testDate.difference(now);
+
+    // debugPrint('🧪 Scheduling test notification in ${diff.inSeconds} seconds');
+
+    // await flutterLocalNotificationsPlugin.zonedSchedule(
+    //   999,
+    //   'Test Notification',
+    //   'This is to confirm notifications work.',
+    //   testDate,
+    //   const NotificationDetails(
+    //     android: AndroidNotificationDetails(
+    //       'lecture_channel',
+    //       'Lecture Reminders',
+    //       channelDescription: 'Lecture schedule reminder',
+    //       importance: Importance.max,
+    //       priority: Priority.high,
+    //       playSound: true,
+    //       enableVibration: true,
+    //     ),
+    //     iOS: DarwinNotificationDetails(),
+    //   ),
+    //   androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+    // );
+
+    // debugPrint('🧪 Test notification scheduled for $testDate');
   }
 
   Future<void> _loadLectures() async {
@@ -159,7 +128,7 @@ class _LectureListPageState extends State<LectureListPage> {
       await _notificationsPlugin.zonedSchedule(
         lecture.hashCode,
         lecture.title,
-        'Lecture at ${lecture.location} on ${lecture.day} (Test)',
+        'Lecture at ${lecture.location} on ${lecture.day}',
         tzScheduledDate,
         const NotificationDetails(
           android: AndroidNotificationDetails(
@@ -173,9 +142,7 @@ class _LectureListPageState extends State<LectureListPage> {
           ),
           iOS: DarwinNotificationDetails(),
         ),
-        androidAllowWhileIdle: true,
-        uiLocalNotificationDateInterpretation:
-            UILocalNotificationDateInterpretation.absoluteTime,
+        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
       );
       debugPrint('🔔 Test notification scheduled for: $tzScheduledDate');
       return;
@@ -203,39 +170,50 @@ class _LectureListPageState extends State<LectureListPage> {
     }
 
     try {
-      final timeString = lecture.time.trim();
-      final is12Hour =
-          timeString.toLowerCase().contains('am') ||
-          timeString.toLowerCase().contains('pm');
+      final timeString = lecture.time.trim().toLowerCase();
+      // Normalize spaces and AM/PM variations
+      final normalizedTimeString = timeString
+          .replaceAll(RegExp(r'[\u202F\u00A0\s]+'), ' ')
+          .replaceAllMapped(
+            RegExp(r'(am|pm)', caseSensitive: false),
+            (Match match) => match.group(0)!.toUpperCase(),
+          )
+          .trim();
 
       int hour;
       int minute;
 
+      final is12Hour = normalizedTimeString.contains(RegExp(r'AM|PM'));
+
       if (is12Hour) {
-        // Replace non-breaking spaces and normalize
-        final cleanedTimeString = timeString
-            .replaceAll(RegExp(r'[\u202F\u00A0\s]+'), ' ')
-            .trim()
-            .replaceAll(RegExp(r'\s+'), ' ');
         try {
-          final dateTime = DateFormat.jm().parse(cleanedTimeString);
-          hour = dateTime.hour;
-          minute = dateTime.minute;
+          // Parse 12-hour format with strict format
+          final parsedTime = DateFormat(
+            'h:mm a',
+          ).parseStrict(normalizedTimeString);
+          hour = parsedTime.hour;
+          minute = parsedTime.minute;
         } catch (e) {
           debugPrint(
-            '❌ Failed to parse 12-hour time: $cleanedTimeString, error: $e',
+            '❌ Failed to parse 12-hour time: $normalizedTimeString, error: $e',
           );
           throw FormatException(
-            'Invalid 12-hour time format: $cleanedTimeString',
+            'Invalid 12-hour time format: $normalizedTimeString',
           );
         }
       } else {
-        final timeParts = timeString.split(':');
+        final timeParts = normalizedTimeString.split(':');
         if (timeParts.length != 2) {
-          throw FormatException('Invalid 24-hour time format: $timeString');
+          throw FormatException(
+            'Invalid 24-hour time format: $normalizedTimeString',
+          );
         }
         hour = int.parse(timeParts[0]);
         minute = int.parse(timeParts[1]);
+        if (hour > 23) {
+          // Convert 24-hour to 12-hour if needed
+          hour = hour % 12 == 0 ? 12 : hour % 12;
+        }
       }
 
       if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
@@ -282,9 +260,8 @@ class _LectureListPageState extends State<LectureListPage> {
           ),
           iOS: DarwinNotificationDetails(),
         ),
-        androidAllowWhileIdle: true,
-        uiLocalNotificationDateInterpretation:
-            UILocalNotificationDateInterpretation.absoluteTime,
+        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+
         matchDateTimeComponents: forceToday
             ? null
             : DateTimeComponents.dayOfWeekAndTime,
@@ -369,35 +346,35 @@ class _LectureListPageState extends State<LectureListPage> {
                             );
                           },
                         ),
-                        IconButton(
-                          icon: const Icon(
-                            Icons.notifications_active,
-                            color: Colors.green,
-                          ),
-                          onPressed: () {
-                            _scheduleNotification(lecture, forceNow: true);
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text(
-                                  'Test notification scheduled for 10 seconds from now',
-                                ),
-                              ),
-                            );
-                          },
-                        ),
-                        IconButton(
-                          icon: const Icon(Icons.today, color: Colors.orange),
-                          onPressed: () {
-                            _scheduleNotification(lecture, forceToday: true);
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text(
-                                  'Notification scheduled for today',
-                                ),
-                              ),
-                            );
-                          },
-                        ),
+                        // IconButton(
+                        //   icon: const Icon(
+                        //     Icons.notifications_active,
+                        //     color: Colors.green,
+                        //   ),
+                        //   onPressed: () {
+                        //     _scheduleNotification(lecture, forceNow: true);
+                        //     ScaffoldMessenger.of(context).showSnackBar(
+                        //       const SnackBar(
+                        //         content: Text(
+                        //           'Test notification scheduled for 10 seconds from now',
+                        //         ),
+                        //       ),
+                        //     );
+                        //   },
+                        // ),
+                        // IconButton(
+                        //   icon: const Icon(Icons.today, color: Colors.orange),
+                        //   onPressed: () {
+                        //     _scheduleNotification(lecture, forceToday: true);
+                        //     ScaffoldMessenger.of(context).showSnackBar(
+                        //       const SnackBar(
+                        //         content: Text(
+                        //           'Notification scheduled for today',
+                        //         ),
+                        //       ),
+                        //     );
+                        //   },
+                        // ),
                       ],
                     ),
                   ),

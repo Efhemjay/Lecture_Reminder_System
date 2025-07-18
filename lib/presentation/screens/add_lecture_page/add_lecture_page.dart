@@ -36,16 +36,27 @@ class _AddLecturePageState extends State<AddLecturePage> {
     if (widget.lectureToEdit != null) {
       _titleController.text = widget.lectureToEdit!.title;
       _selectedDay = widget.lectureToEdit!.day;
-
-      // Fix: handle AM/PM formats gracefully
-      final timeString = widget.lectureToEdit!.time.trim();
-      final is12HourFormat = timeString.contains(RegExp(r'[AaPp][Mm]'));
+      _locationController.text = widget.lectureToEdit!.location;
 
       try {
+        final timeString = widget.lectureToEdit!.time.trim();
+        final is12HourFormat = timeString.contains(
+          RegExp(r'[AaPp][Mm]', caseSensitive: false),
+        );
+
         TimeOfDay parsedTime;
 
         if (is12HourFormat) {
-          final dateTime = DateFormat.jm().parse(timeString); // e.g. "6:30 PM"
+          final normalizedTimeString = timeString
+              .replaceAll(RegExp(r'[\u202F\u00A0\s]+'), ' ')
+              .replaceAllMapped(
+                RegExp(r'(am|pm)', caseSensitive: false),
+                (Match match) => match.group(0)!.toUpperCase(),
+              )
+              .trim();
+          final dateTime = DateFormat(
+            'h:mm a',
+          ).parseStrict(normalizedTimeString);
           parsedTime = TimeOfDay.fromDateTime(dateTime);
         } else {
           final timeParts = timeString.split(':');
@@ -54,17 +65,15 @@ class _AddLecturePageState extends State<AddLecturePage> {
             final minute = int.parse(timeParts[1]);
             parsedTime = TimeOfDay(hour: hour, minute: minute);
           } else {
-            throw FormatException("Invalid time format");
+            throw FormatException("Invalid time format: $timeString");
           }
         }
 
         _selectedTime = parsedTime;
       } catch (e) {
         debugPrint('⚠️ Failed to parse lecture time: $e');
-        _selectedTime = TimeOfDay.now(); // fallback
+        _selectedTime = TimeOfDay.now(); // Fallback
       }
-
-      _locationController.text = widget.lectureToEdit!.location;
     }
   }
 
@@ -188,7 +197,15 @@ class _AddLecturePageState extends State<AddLecturePage> {
                     final lecture = Lecture(
                       title: _titleController.text,
                       day: _selectedDay!,
-                      time: _selectedTime!.format(context),
+                      time: DateFormat('h:mm a').format(
+                        DateTime(
+                          2025,
+                          1,
+                          1,
+                          _selectedTime!.hour,
+                          _selectedTime!.minute,
+                        ),
+                      ),
                       location: _locationController.text,
                     );
                     Navigator.pop(context, lecture);

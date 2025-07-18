@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:lecture_reminder_system/presentation/screens/lecture_list_page/lecture_list_page.dart';
 
 class LoginPage extends StatefulWidget {
@@ -22,6 +23,30 @@ class _LoginPageState extends State<LoginPage> {
         _opacity = 1.0;
       });
     });
+  }
+
+  Future<void> fireTestNotificationNow() async {
+    const AndroidNotificationDetails androidPlatformChannelSpecifics =
+        AndroidNotificationDetails(
+          'lecture_reminder_channel', // channel id
+          'Lecture Reminders', // channel name
+          channelDescription: 'Test notifications for lectures',
+          importance: Importance.max,
+          priority: Priority.high,
+          ticker: 'ticker',
+        );
+
+    const NotificationDetails platformChannelSpecifics = NotificationDetails(
+      android: androidPlatformChannelSpecifics,
+    );
+
+    await FlutterLocalNotificationsPlugin().show(
+      9999, // unique ID for this test
+      '🔔 Test Notification',
+      'This is a test to see if notifications work!',
+      platformChannelSpecifics,
+      payload: 'test_payload',
+    );
   }
 
   @override
@@ -95,6 +120,12 @@ class _LoginPageState extends State<LoginPage> {
                       style: TextStyle(fontSize: 18, color: Colors.white),
                     ),
                   ),
+                  // ElevatedButton(
+                  //   onPressed: () {
+                  //     fireTestNotificationNow();
+                  //   },
+                  //   child: Text("Test Notification"),
+                  // ),
                 ],
               ),
             ),
