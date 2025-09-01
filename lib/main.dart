@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:lecture_reminder_system/presentation/screens/lecture_list_page/lecture_list_page.dart';
@@ -8,6 +9,7 @@ import 'package:lecture_reminder_system/core/services/overlay_alarm_service.dart
 import 'package:lecture_reminder_system/core/services/alarm_state_service.dart';
 import 'package:timezone/data/latest.dart' as tz;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:flutter/services.dart';
 
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
     FlutterLocalNotificationsPlugin();
@@ -50,13 +52,41 @@ void main() async {
           final alarm = Alarm.fromJson(alarmData);
           final alarmStateService = AlarmStateService();
 
-          // Check if alarm was recently handled (stopped or snoozed)
-          if (alarmStateService.wasRecentlyHandled(alarm.hashCode)) {
-            final state = alarmStateService.getAlarmState(alarm.hashCode);
+          // Check if alarm is already showing or was recently stopped
+          if (alarmStateService.isAlarmShowing(alarm.hashCode)) {
             debugPrint(
-              '🔔 Alarm ${alarm.title} was recently $state - not showing alarm screen',
+              '🔔 Alarm ${alarm.title} is already showing - not triggering again',
             );
             return;
+          }
+
+          if (alarmStateService.wasRecentlyStopped(alarm.hashCode)) {
+            debugPrint(
+              '🔔 Alarm ${alarm.title} was recently stopped - not showing again',
+            );
+            return;
+          }
+
+          // Additional check: if app is active and alarm is already ringing, don't show again
+          final isCurrentlyActive =
+              WidgetsBinding.instance.lifecycleState ==
+              AppLifecycleState.resumed;
+          if (isCurrentlyActive &&
+              alarmStateService.isAlarmRinging(alarm.hashCode)) {
+            debugPrint(
+              '🔔 Alarm ${alarm.title} is already ringing in Flutter - not showing duplicate UI',
+            );
+            return;
+          }
+
+          // Check if this is a snoozed alarm that should be shown
+          if (alarmStateService.getAlarmState(alarm.hashCode) ==
+              AlarmState.snoozed) {
+            if (!alarmStateService.shouldShowSnoozedAlarm(alarm.hashCode)) {
+              debugPrint('🔔 Snoozed alarm ${alarm.title} not ready yet');
+              return;
+            }
+            debugPrint('🔔 Showing snoozed alarm ${alarm.title}');
           }
 
           // Check if app is in focus/active
@@ -67,6 +97,26 @@ void main() async {
           if (isAppActive) {
             // App is open and in focus - ALWAYS use Flutter alarm screen
             // Never show native overlay when app is open
+            debugPrint(
+              '🔔 App is active - using Flutter alarm screen for: ${alarm.title}',
+            );
+
+            // Mark this alarm as showing in Flutter UI
+            alarmStateService.setActiveUI(alarm.hashCode, 'flutter');
+            alarmStateService.setAlarmState(alarm.hashCode, AlarmState.ringing);
+
+            // IMPORTANT: Cancel any native alarm that might be trying to show
+            // This prevents double UIs when both are scheduled
+            try {
+              final overlayAlarmService = OverlayAlarmService();
+              await overlayAlarmService.cancelNativeAlarm(alarm);
+              debugPrint(
+                '🔔 Cancelled scheduled native alarm for ${alarm.title} to prevent double UI',
+              );
+            } catch (e) {
+              debugPrint('⚠️ Failed to cancel native alarm: $e');
+            }
+
             final alarmService = AlarmService();
             await alarmService.startAlarm(alarm);
 
@@ -83,13 +133,66 @@ void main() async {
             });
           } else {
             // App is closed or not in focus - check overlay permission
+            debugPrint(
+              '🔔 App is not active - checking overlay permission for: ${alarm.title}',
+            );
+
             final overlayAlarmService = OverlayAlarmService();
             final hasPermission = await overlayAlarmService
                 .hasOverlayPermission();
 
             if (hasPermission) {
               // Permission granted - show native overlay over other apps
-              await overlayAlarmService.startAlarmOverlay(alarm);
+              // But first double-check that app is still not active
+              final isStillActive =
+                  WidgetsBinding.instance.lifecycleState ==
+                  AppLifecycleState.resumed;
+              if (!isStillActive) {
+                // Mark this alarm as showing in native UI
+                alarmStateService.setActiveUI(alarm.hashCode, 'native');
+                alarmStateService.setAlarmState(
+                  alarm.hashCode,
+                  AlarmState.ringing,
+                );
+
+                await overlayAlarmService.startAlarmOverlay(alarm);
+              } else {
+                debugPrint(
+                  '🔔 App became active - using Flutter alarm screen instead',
+                );
+                // App became active, use Flutter alarm screen
+                // Mark this alarm as showing in Flutter UI
+                alarmStateService.setActiveUI(alarm.hashCode, 'flutter');
+                alarmStateService.setAlarmState(
+                  alarm.hashCode,
+                  AlarmState.ringing,
+                );
+
+                // IMPORTANT: Cancel any native alarm that might be trying to show
+                // This prevents double UIs when both are scheduled
+                try {
+                  await overlayAlarmService.cancelNativeAlarm(alarm);
+                  debugPrint(
+                    '🔔 Cancelled scheduled native alarm for ${alarm.title} to prevent double UI',
+                  );
+                } catch (e) {
+                  debugPrint('⚠️ Failed to cancel native alarm: $e');
+                }
+
+                final alarmService = AlarmService();
+                await alarmService.startAlarm(alarm);
+
+                Future.delayed(const Duration(milliseconds: 500), () {
+                  if (navigatorKey.currentContext != null) {
+                    Navigator.of(navigatorKey.currentContext!).push(
+                      MaterialPageRoute(
+                        builder: (context) => AlarmScreen(alarm: alarm),
+                        fullscreenDialog: true,
+                      ),
+                    );
+                  }
+                });
+              }
             } else {
               // Permission denied - just show notification, no overlay
               // The notification will be handled by the notification system
@@ -120,6 +223,73 @@ void main() async {
 
   await androidPlugin?.createNotificationChannel(channel);
 
+  // Set up broadcast receiver for alarm state changes from native service
+  const MethodChannel alarmChannel = MethodChannel('alarm_overlay_channel');
+  alarmChannel.setMethodCallHandler((call) async {
+    if (call.method == 'onAlarmStateChanged') {
+      final alarmId = call.arguments['alarm_id'] as int?;
+      final state = call.arguments['state'] as String?;
+
+      if (alarmId != null && state != null) {
+        final alarmStateService = AlarmStateService();
+
+        switch (state) {
+          case 'stopped':
+            alarmStateService.stopAlarmCompletely(alarmId);
+            debugPrint('🔕 Native alarm completely stopped for ID: $alarmId');
+            break;
+          case 'snoozed':
+            // Get snooze duration from native service
+            final snoozeMinutes = call.arguments['snooze_minutes'] as int? ?? 5;
+            alarmStateService.snoozeAlarm(alarmId, snoozeMinutes);
+            debugPrint(
+              '⏰ Native alarm snoozed for ID: $alarmId for $snoozeMinutes minutes',
+            );
+
+            // Get alarm data from native service to reschedule
+            final alarmTitle =
+                call.arguments['alarm_title'] as String? ?? 'Lecture Reminder';
+            final alarmTime = call.arguments['alarm_time'] as String? ?? '';
+            final alarmLocation =
+                call.arguments['alarm_location'] as String? ?? '';
+            final alarmDay = call.arguments['alarm_day'] as String? ?? '';
+
+            // Create a temporary alarm object for rescheduling
+            final tempAlarm = Alarm(
+              title: alarmTitle,
+              time: alarmTime,
+              location: alarmLocation,
+              day: alarmDay,
+              settings: AlarmSettings(), // Use default settings
+            );
+
+            // Schedule the snoozed alarm to show again after snooze duration
+            Future.delayed(Duration(minutes: snoozeMinutes), () {
+              // Check if app is active to decide which UI to show
+              final isAppActive =
+                  WidgetsBinding.instance.lifecycleState ==
+                  AppLifecycleState.resumed;
+
+              if (isAppActive) {
+                // App is open - show Flutter UI
+                debugPrint(
+                  '🔔 Snoozed alarm ready - showing Flutter UI for ${tempAlarm.title}',
+                );
+                _showFlutterAlarmFromMain(tempAlarm);
+              } else {
+                // App is closed - show native overlay
+                debugPrint(
+                  '🔔 Snoozed alarm ready - showing native overlay for ${tempAlarm.title}',
+                );
+                _showNativeAlarmFromMain(tempAlarm);
+              }
+            });
+            break;
+        }
+      }
+    }
+  });
+
   // Request overlay permission on app startup
   await _requestOverlayPermissionOnStartup();
 
@@ -134,6 +304,40 @@ void main() async {
   }
 
   runApp(const LectureReminderApp());
+}
+
+// Helper functions for handling snoozed alarms from main scope
+void _showFlutterAlarmFromMain(Alarm alarm) {
+  final alarmStateService = AlarmStateService();
+  final alarmId = alarm.hashCode;
+
+  // Mark this alarm as showing in Flutter UI
+  alarmStateService.setActiveUI(alarmId, 'flutter');
+  alarmStateService.setAlarmState(alarmId, AlarmState.ringing);
+
+  // Navigate to alarm screen
+  if (navigatorKey.currentContext != null) {
+    Navigator.push(
+      navigatorKey.currentContext!,
+      MaterialPageRoute(
+        builder: (context) => AlarmScreen(alarm: alarm),
+        fullscreenDialog: true,
+      ),
+    );
+  }
+}
+
+void _showNativeAlarmFromMain(Alarm alarm) {
+  final alarmStateService = AlarmStateService();
+  final alarmId = alarm.hashCode;
+
+  // Mark this alarm as showing in native UI
+  alarmStateService.setActiveUI(alarmId, 'native');
+  alarmStateService.setAlarmState(alarmId, AlarmState.ringing);
+
+  // Start native overlay
+  final overlayService = OverlayAlarmService();
+  overlayService.startAlarmOverlay(alarm);
 }
 
 /// Request overlay permission when the app starts up
@@ -164,6 +368,8 @@ class LectureReminderApp extends StatefulWidget {
 }
 
 class _LectureReminderAppState extends State<LectureReminderApp> {
+  Timer? _snoozeCheckTimer;
+
   @override
   void initState() {
     super.initState();
@@ -171,7 +377,38 @@ class _LectureReminderAppState extends State<LectureReminderApp> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _checkNotificationLaunch();
       _requestOverlayPermissionOnAppReady();
+      _startSnoozeCheckTimer();
     });
+  }
+
+  @override
+  void dispose() {
+    _snoozeCheckTimer?.cancel();
+    super.dispose();
+  }
+
+  void _startSnoozeCheckTimer() {
+    // Check for snoozed alarms every 10 seconds
+    _snoozeCheckTimer = Timer.periodic(const Duration(seconds: 10), (timer) {
+      _checkSnoozedAlarms();
+    });
+  }
+
+  void _checkSnoozedAlarms() {
+    final alarmStateService = AlarmStateService();
+
+    // Check if there are any snoozed alarms that are ready to show
+    // We need to find the alarm that was snoozed and check if it's time to show it
+    // For now, we'll implement a basic check - in a real app, you'd want to store
+    // the alarm data somewhere to retrieve it when needed
+
+    debugPrint('🔍 Checking for snoozed alarms...');
+
+    // TODO: Implement proper snoozed alarm checking
+    // This would involve:
+    // 1. Storing alarm data when it's snoozed
+    // 2. Checking if any stored alarms are ready to show
+    // 3. Triggering the appropriate UI (Flutter or native) based on app state
   }
 
   void _checkNotificationLaunch() async {
@@ -182,32 +419,97 @@ class _LectureReminderAppState extends State<LectureReminderApp> {
         final alarm = Alarm.fromJson(alarmData);
         final alarmStateService = AlarmStateService();
 
-        // Check if alarm was recently handled (stopped or snoozed)
-        if (alarmStateService.wasRecentlyHandled(alarm.hashCode)) {
-          final state = alarmStateService.getAlarmState(alarm.hashCode);
+        // Check if alarm is already showing or was recently stopped
+        if (alarmStateService.isAlarmShowing(alarm.hashCode)) {
           debugPrint(
-            '🔔 Alarm ${alarm.title} was recently $state - not showing alarm screen',
+            '🔔 Alarm ${alarm.title} is already showing - not triggering again',
           );
           _initialNotificationPayload = null;
           return;
         }
 
+        if (alarmStateService.wasRecentlyStopped(alarm.hashCode)) {
+          debugPrint(
+            '🔔 Alarm ${alarm.title} was recently stopped - not showing again',
+          );
+          _initialNotificationPayload = null;
+          return;
+        }
+
+        // Additional check: if app is active and alarm is already ringing, don't show again
+        final isCurrentlyActive =
+            WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
+        if (isCurrentlyActive &&
+            alarmStateService.isAlarmRinging(alarm.hashCode)) {
+          debugPrint(
+            '🔔 Alarm ${alarm.title} is already ringing in Flutter - not showing duplicate UI',
+          );
+          _initialNotificationPayload = null;
+          return;
+        }
+
+        // Check if this is a snoozed alarm that should be shown
+        if (alarmStateService.getAlarmState(alarm.hashCode) ==
+            AlarmState.snoozed) {
+          if (!alarmStateService.shouldShowSnoozedAlarm(alarm.hashCode)) {
+            debugPrint('🔔 Snoozed alarm ${alarm.title} not ready yet');
+            _initialNotificationPayload = null;
+            return;
+          }
+          debugPrint('🔔 Showing snoozed alarm ${alarm.title}');
+        }
+
         // Since this is called when app is launched from notification,
         // we should use the Flutter alarm screen approach
-        final alarmService = AlarmService();
-        await alarmService.startAlarm(alarm);
+        // But first check if app is currently active
+        final isAppActive =
+            WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
 
-        // Navigate to alarm screen
-        Future.delayed(const Duration(milliseconds: 1000), () {
-          if (navigatorKey.currentContext != null) {
-            Navigator.of(navigatorKey.currentContext!).push(
-              MaterialPageRoute(
-                builder: (context) => AlarmScreen(alarm: alarm),
-                fullscreenDialog: true,
-              ),
+        if (isAppActive) {
+          // Mark this alarm as showing in Flutter UI
+          alarmStateService.setActiveUI(alarm.hashCode, 'flutter');
+          alarmStateService.setAlarmState(alarm.hashCode, AlarmState.ringing);
+
+          // IMPORTANT: Cancel any native alarm that might be trying to show
+          // This prevents double UIs when both are scheduled
+          try {
+            final overlayAlarmService = OverlayAlarmService();
+            await overlayAlarmService.cancelNativeAlarm(alarm);
+            debugPrint(
+              '🔔 Cancelled scheduled native alarm for ${alarm.title} to prevent double UI',
             );
+          } catch (e) {
+            debugPrint('⚠️ Failed to cancel native alarm: $e');
           }
-        });
+
+          final alarmService = AlarmService();
+          await alarmService.startAlarm(alarm);
+
+          // Navigate to alarm screen
+          Future.delayed(const Duration(milliseconds: 1000), () {
+            if (navigatorKey.currentContext != null) {
+              Navigator.of(navigatorKey.currentContext!).push(
+                MaterialPageRoute(
+                  builder: (context) => AlarmScreen(alarm: alarm),
+                  fullscreenDialog: true,
+                ),
+              );
+            }
+          });
+        } else {
+          // App is not active, use native overlay
+          final overlayAlarmService = OverlayAlarmService();
+          final hasPermission = await overlayAlarmService
+              .hasOverlayPermission();
+
+          if (hasPermission) {
+            // Mark this alarm as showing in native UI
+            alarmStateService.setActiveUI(alarm.hashCode, 'native');
+            alarmStateService.setAlarmState(alarm.hashCode, AlarmState.ringing);
+
+            await overlayAlarmService.startAlarmOverlay(alarm);
+          }
+        }
 
         // Clear the payload after handling
         _initialNotificationPayload = null;

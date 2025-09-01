@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:lecture_reminder_system/model/alarm_model.dart';
 import 'package:lecture_reminder_system/core/services/alarm_service.dart';
+import 'package:lecture_reminder_system/core/services/alarm_state_service.dart';
+import 'package:lecture_reminder_system/core/services/overlay_alarm_service.dart';
+import 'package:lecture_reminder_system/main.dart';
 import 'package:intl/intl.dart';
 
 class AlarmScreen extends StatefulWidget {
@@ -202,10 +205,67 @@ class _AlarmScreenState extends State<AlarmScreen>
                                   'Snooze\n${widget.alarm.settings.snoozeInterval.minutes}m',
                               color: Colors.orange,
                               onPressed: () async {
-                                await _alarmService.snoozeAlarm();
+                                final alarmStateService = AlarmStateService();
+                                final alarmId = widget.alarm.hashCode;
+
+                                // Handle snooze through state service
+                                alarmStateService.snoozeAlarm(
+                                  alarmId,
+                                  widget.alarm.settings.snoozeInterval.minutes,
+                                );
+
+                                // Stop current alarm
+                                await _alarmService.stopAlarm();
+
+                                // Clear UI tracking
+                                alarmStateService.setActiveUI(alarmId, '');
+
                                 if (mounted) {
                                   Navigator.pop(context);
                                 }
+
+                                // Schedule next snooze alarm
+                                Future.delayed(
+                                  Duration(
+                                    minutes: widget
+                                        .alarm
+                                        .settings
+                                        .snoozeInterval
+                                        .minutes,
+                                  ),
+                                  () {
+                                    if (alarmStateService.getAlarmState(
+                                          alarmId,
+                                        ) ==
+                                        AlarmState.snoozed) {
+                                      // Check if app is active to decide which UI to show
+                                      final isAppActive =
+                                          WidgetsBinding
+                                              .instance
+                                              .lifecycleState ==
+                                          AppLifecycleState.resumed;
+                                      if (isAppActive) {
+                                        // Show Flutter alarm screen
+                                        Navigator.push(
+                                          navigatorKey.currentContext!,
+                                          MaterialPageRoute(
+                                            builder: (context) => AlarmScreen(
+                                              alarm: widget.alarm,
+                                            ),
+                                            fullscreenDialog: true,
+                                          ),
+                                        );
+                                      } else {
+                                        // Show native overlay
+                                        final overlayService =
+                                            OverlayAlarmService();
+                                        overlayService.startAlarmOverlay(
+                                          widget.alarm,
+                                        );
+                                      }
+                                    }
+                                  },
+                                );
                               },
                             ),
 
@@ -215,7 +275,15 @@ class _AlarmScreenState extends State<AlarmScreen>
                             label: 'Stop\nAlarm',
                             color: Colors.red,
                             onPressed: () async {
+                              final alarmStateService = AlarmStateService();
+                              final alarmId = widget.alarm.hashCode;
+
+                              // Completely stop the alarm (including snooze)
+                              alarmStateService.stopAlarmCompletely(alarmId);
+
+                              // Stop current alarm sound
                               await _alarmService.stopAlarm();
+
                               if (mounted) {
                                 Navigator.pop(context);
                               }

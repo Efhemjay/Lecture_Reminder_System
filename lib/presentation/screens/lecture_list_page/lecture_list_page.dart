@@ -115,18 +115,36 @@ class _LectureListPageState extends State<LectureListPage> {
 
   Future<void> _scheduleAlarmScreen(
     Alarm alarm, {
-    bool forceNow = false,
     bool forceToday = false,
+    DateTime? scheduledDate,
   }) async {
     final now = DateTime.now();
 
-    if (forceNow) {
-      // Schedule for 10 seconds from now for testing
-      Future.delayed(const Duration(seconds: 10), () {
+    // Remove forceNow testing logic - no more automatic test alarms
+    // if (forceNow) {
+    //   // Schedule for 10 seconds from now for testing
+    //   Future.delayed(const Duration(seconds: 10), () {
+    //     if (mounted) {
+    //       _triggerAlarmScreen(alarm);
+    //     }
+    //   });
+    //   return;
+    // }
+
+    // If scheduledDate is provided, use it directly
+    if (scheduledDate != null) {
+      final delay = scheduledDate.difference(now);
+      if (delay.isNegative) return;
+
+      Future.delayed(delay, () {
         if (mounted) {
           _triggerAlarmScreen(alarm);
         }
       });
+
+      debugPrint(
+        '🔔 Alarm screen scheduled for ${alarm.title} at exact time: $scheduledDate (in ${delay.inSeconds} seconds)',
+      );
       return;
     }
 
@@ -209,14 +227,31 @@ class _LectureListPageState extends State<LectureListPage> {
 
   void _triggerAlarmScreen(Alarm alarm) async {
     final alarmStateService = AlarmStateService();
+    final alarmId = alarm.hashCode;
 
-    // Check if alarm was recently handled (stopped or snoozed)
-    if (alarmStateService.wasRecentlyHandled(alarm.hashCode)) {
-      final state = alarmStateService.getAlarmState(alarm.hashCode);
+    // Check if alarm is already showing in any UI
+    if (alarmStateService.isAlarmShowing(alarmId)) {
       debugPrint(
-        '🔔 Alarm ${alarm.title} was recently $state - not showing alarm screen',
+        '🔔 Alarm ${alarm.title} is already showing - not triggering again',
       );
       return;
+    }
+
+    // Check if alarm was recently stopped
+    if (alarmStateService.wasRecentlyStopped(alarmId)) {
+      debugPrint(
+        '🔔 Alarm ${alarm.title} was recently stopped - not showing again',
+      );
+      return;
+    }
+
+    // Check if this is a snoozed alarm that should be shown
+    if (alarmStateService.getAlarmState(alarmId) == AlarmState.snoozed) {
+      if (!alarmStateService.shouldShowSnoozedAlarm(alarmId)) {
+        debugPrint('🔔 Snoozed alarm ${alarm.title} not ready yet');
+        return;
+      }
+      debugPrint('🔔 Showing snoozed alarm ${alarm.title}');
     }
 
     // Check if app is in focus/active
@@ -224,8 +259,26 @@ class _LectureListPageState extends State<LectureListPage> {
         WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
 
     if (isAppActive) {
-      // App is open and in focus - ALWAYS use Flutter alarm screen
-      // Never show native overlay when app is open
+      // App is open and in focus - use Flutter alarm screen
+      debugPrint(
+        '🔔 App is active - using Flutter alarm screen for: ${alarm.title}',
+      );
+
+      // IMPORTANT: Cancel any native alarm that might be trying to show
+      // This prevents double UIs when both are scheduled
+      try {
+        await _overlayAlarmService.cancelNativeAlarm(alarm);
+        debugPrint(
+          '🔔 Cancelled scheduled native alarm for ${alarm.title} to prevent double UI',
+        );
+      } catch (e) {
+        debugPrint('⚠️ Failed to cancel native alarm: $e');
+      }
+
+      // Mark this alarm as showing in Flutter UI
+      alarmStateService.setActiveUI(alarmId, 'flutter');
+      alarmStateService.setAlarmState(alarmId, AlarmState.ringing);
+
       await _alarmService.startAlarm(alarm);
 
       // Navigate to alarm screen
@@ -238,59 +291,79 @@ class _LectureListPageState extends State<LectureListPage> {
       );
     } else {
       // App is closed or not in focus - check overlay permission
+      debugPrint(
+        '🔔 App is not active - checking overlay permission for: ${alarm.title}',
+      );
+
       final hasPermission = await _overlayAlarmService.hasOverlayPermission();
 
       if (hasPermission) {
         // Permission granted - show native overlay over other apps
+        // Mark this alarm as showing in native UI
+        alarmStateService.setActiveUI(alarmId, 'native');
+        alarmStateService.setAlarmState(alarmId, AlarmState.ringing);
+
         await _overlayAlarmService.startAlarmOverlay(alarm);
       } else {
-        // Permission denied - just show notification, no overlay
-        // The notification will be handled by the notification system
-        debugPrint('🔔 Overlay permission denied - showing notification only');
+        // Permission denied - fallback to Flutter alarm
+        debugPrint(
+          '⚠️ No overlay permission - using Flutter alarm as fallback',
+        );
+        alarmStateService.setActiveUI(alarmId, 'flutter');
+        alarmStateService.setAlarmState(alarmId, AlarmState.ringing);
+
+        await _alarmService.startAlarm(alarm);
+
+        // Navigate to alarm screen
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => AlarmScreen(alarm: alarm),
+            fullscreenDialog: true,
+          ),
+        );
       }
     }
   }
 
   Future<void> _scheduleNotification(
     Alarm alarm, {
-    bool forceNow = false,
     bool forceToday = false,
   }) async {
-    // Also schedule the alarm screen to appear automatically
-    _scheduleAlarmScreen(alarm, forceNow: forceNow, forceToday: forceToday);
     final now = DateTime.now();
     debugPrint(
       'Scheduling: ${alarm.title} on ${alarm.day} at ${alarm.time} '
-      '(Current time: $now, Force now: $forceNow, Force today: $forceToday)',
+      '(Current time: $now, Force today: $forceToday)',
     );
 
-    if (forceNow) {
-      // Schedule for 10 seconds from now for testing
-      final tzScheduledDate = tz.TZDateTime.now(
-        tz.local,
-      ).add(const Duration(seconds: 10));
-      await _notificationsPlugin.zonedSchedule(
-        alarm.hashCode,
-        alarm.title,
-        'Lecture at ${alarm.location} on ${alarm.day}',
-        tzScheduledDate,
-        const NotificationDetails(
-          android: AndroidNotificationDetails(
-            'lecture_channel',
-            'Lecture Reminders',
-            channelDescription: 'Lecture schedule reminder',
-            importance: Importance.max,
-            priority: Priority.high,
-            playSound: true,
-            enableVibration: true,
-          ),
-          iOS: DarwinNotificationDetails(),
-        ),
-        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-      );
-      debugPrint('🔔 Test notification scheduled for: $tzScheduledDate');
-      return;
-    }
+    // Remove forceNow testing logic - no more automatic test notifications
+    // if (forceNow) {
+    //   // Schedule for 10 seconds from now for testing
+    //   final tzScheduledDate = tz.TZDateTime.now(
+    //     tz.local,
+    //   ).add(const Duration(seconds: 10));
+    //   await _notificationsPlugin.zonedSchedule(
+    //     alarm.hashCode,
+    //     alarm.title,
+    //     'Lecture at ${alarm.location} on ${alarm.day}',
+    //     tzScheduledDate,
+    //     const NotificationDetails(
+    //       android: AndroidNotificationDetails(
+    //         'lecture_channel',
+    //         'Lecture Reminders',
+    //         channelDescription: 'Lecture schedule reminder',
+    //         importance: Importance.max,
+    //         priority: Priority.high,
+    //         playSound: true,
+    //         enableVibration: true,
+    //     ),
+    //       iOS: DarwinNotificationDetails(),
+    //     ),
+    //     androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+    //   );
+    //   debugPrint('🔔 Test notification scheduled for: $tzScheduledDate');
+    //   return;
+    // }
 
     final Map<String, int> weekdayMap = {
       'Monday': DateTime.monday,
@@ -380,7 +453,12 @@ class _LectureListPageState extends State<LectureListPage> {
           scheduledDate = now.add(const Duration(seconds: 10));
         }
       } else if (daysToAdd == 0 && scheduledDate.isBefore(now)) {
-        daysToAdd = 7; // Schedule for next week if time has passed
+        // If it's the same day but time has passed, schedule for today (10 seconds from now)
+        // This is more user-friendly - if they're setting an alarm, they probably want it now
+        scheduledDate = now.add(const Duration(seconds: 10));
+        debugPrint(
+          '⏰ Time has passed, scheduling for today (10 seconds from now)',
+        );
       }
 
       scheduledDate = scheduledDate.add(Duration(days: daysToAdd));
@@ -413,11 +491,23 @@ class _LectureListPageState extends State<LectureListPage> {
         payload: jsonEncode(alarm.toJson()),
       );
 
-      // Also schedule native alarm if overlay permission is granted
+      // Always schedule Flutter alarm (primary)
+      debugPrint('🔔 Scheduling Flutter alarm for ${alarm.title}');
+      _scheduleAlarmScreen(
+        alarm,
+        forceToday: forceToday,
+        scheduledDate: scheduledDate,
+      );
+
+      // Also schedule native alarm as backup (will only show if app is closed when triggered)
       final hasPermission = await _overlayAlarmService.hasOverlayPermission();
       if (hasPermission) {
         await _overlayAlarmService.scheduleNativeAlarm(alarm, scheduledDate);
-        debugPrint('✅ Native alarm also scheduled for ${alarm.title}');
+        debugPrint(
+          '✅ Native alarm also scheduled as backup for ${alarm.title}',
+        );
+      } else {
+        debugPrint('⚠️ No overlay permission - native backup not available');
       }
 
       debugPrint('✅ Notification scheduled for ${alarm.title}');
@@ -573,10 +663,6 @@ class _LectureListPageState extends State<LectureListPage> {
               alarms.add(newLecture);
             });
             _saveLectures();
-            _scheduleNotification(
-              newLecture,
-              forceNow: true,
-            ); // Test immediately
             _scheduleNotification(newLecture); // Regular schedule
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
@@ -639,7 +725,6 @@ class _LectureListPageState extends State<LectureListPage> {
                   alarms.add(newLecture);
                 });
                 _saveLectures();
-                _scheduleNotification(newLecture, forceNow: true);
                 _scheduleNotification(newLecture);
               }
             },

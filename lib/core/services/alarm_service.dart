@@ -134,9 +134,16 @@ class AlarmService {
     }
 
     if (_currentAlarm != null) {
+      // Cancel any pending snooze notifications
+      await flutterLocalNotificationsPlugin.cancel(
+        _currentAlarm!.hashCode + 1000,
+      );
+
       _currentAlarm = _currentAlarm!.copyWith(
         state: AlarmState.stopped,
         snoozeCount: 0,
+        lastSnoozeTime: null,
+        nextAlarmTime: null,
       );
       _alarmStateController.add(_currentAlarm);
     }
@@ -245,6 +252,16 @@ class AlarmService {
     } catch (e) {
       debugPrint('❌ Error resuming media: $e');
       _wasMediaPlaying = false;
+    }
+  }
+
+  /// Cancel snooze notification for a specific alarm
+  Future<void> cancelSnoozeNotification(Alarm alarm) async {
+    try {
+      await flutterLocalNotificationsPlugin.cancel(alarm.hashCode + 1000);
+      debugPrint('🔕 Snooze notification canceled for: ${alarm.title}');
+    } catch (e) {
+      debugPrint('❌ Error canceling snooze notification: $e');
     }
   }
 }

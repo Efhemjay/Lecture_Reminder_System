@@ -89,11 +89,35 @@ class AlarmForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        println("🔔 AlarmForegroundService.onStartCommand called with action: ${intent?.action}")
+        
         val alarmTitle = intent?.getStringExtra(EXTRA_ALARM_TITLE) ?: "Lecture Reminder"
         val alarmTime = intent?.getStringExtra(EXTRA_ALARM_TIME) ?: ""
         val alarmLocation = intent?.getStringExtra(EXTRA_ALARM_LOCATION) ?: ""
         val alarmDay = intent?.getStringExtra(EXTRA_ALARM_DAY) ?: ""
         val alarmId = intent?.getIntExtra(EXTRA_ALARM_ID, 0) ?: 0
+
+        println("🔔 Received alarm data - Title: $alarmTitle, Time: $alarmTime, ID: $alarmId")
+
+        // Check if this is a START_ALARM_OVERLAY action
+        if (intent?.action == "START_ALARM_OVERLAY") {
+            println("🔔 Processing START_ALARM_OVERLAY action for alarm ID: $alarmId")
+            
+            // Check if the app is currently active/visible
+            val appActive = isAppActive()
+            println("🔔 App active check result: $appActive")
+            
+            if (appActive) {
+                println("🔔 App is active - not showing native overlay for alarm ID: $alarmId")
+                // Stop the service since we don't need to show the overlay
+                stopSelf()
+                return START_NOT_STICKY
+            }
+            
+            println("🔔 App is not active - showing native overlay for alarm ID: $alarmId")
+        } else {
+            println("🔔 Not a START_ALARM_OVERLAY action, continuing with service...")
+        }
 
         // Start foreground service
         startForeground(NOTIFICATION_ID, createNotification(alarmTitle))
@@ -110,6 +134,32 @@ class AlarmForegroundService : Service() {
         showAlarmOverlay(alarmTitle, alarmTime, alarmLocation, alarmDay, alarmId)
 
         return START_STICKY
+    }
+    
+    private fun isAppActive(): Boolean {
+        val activityManager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        val appTasks = activityManager.getRunningTasks(1)
+        
+        println("🔔 isAppActive() - Number of running tasks: ${appTasks.size}")
+        
+        if (appTasks.isNotEmpty()) {
+            val topActivity = appTasks[0].topActivity
+            if (topActivity != null) {
+                val packageName = topActivity.packageName
+                val className = topActivity.className
+                println("🔔 Top activity - Package: $packageName, Class: $className")
+                val isOurApp = packageName == "com.lecture_reminder_system.lecture_reminder_system"
+                println("🔔 Is our app active: $isOurApp")
+                return isOurApp
+            } else {
+                println("🔔 Top activity is null")
+            }
+        } else {
+            println("🔔 No running tasks found")
+        }
+        
+        println("🔔 Returning false - app not active")
+        return false
     }
 
     private fun createNotificationChannel() {
@@ -195,19 +245,34 @@ class AlarmForegroundService : Service() {
             isAlarmActive = false
             
             // Stop sound
-            if (mediaPlayer.isPlaying) {
-                mediaPlayer.stop()
-                mediaPlayer.reset()
+            try {
+                if (mediaPlayer.isPlaying) {
+                    mediaPlayer.stop()
+                    mediaPlayer.reset()
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
             
-            // Stop vibration
-            vibrationHandler?.removeCallbacksAndMessages(null)
-            if (vibrator.hasVibrator()) {
-                vibrator.cancel()
+            // Stop vibration - ensure it stops completely
+            try {
+                vibrationHandler?.removeCallbacksAndMessages(null)
+                vibrationHandler = null
+                vibrationRunnable = null
+                
+                if (vibrator.hasVibrator()) {
+                    vibrator.cancel()
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
             
             // Abandon audio focus to allow media to resume
-            audioManager.abandonAudioFocus(audioFocusChangeListener)
+            try {
+                audioManager.abandonAudioFocus(audioFocusChangeListener)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
             
         } catch (e: Exception) {
             e.printStackTrace()
@@ -231,7 +296,7 @@ class AlarmForegroundService : Service() {
             }
 
             overlayView.findViewById<Button>(R.id.snoozeButton).setOnClickListener {
-                snoozeAlarm(alarmId)
+                snoozeAlarm(alarmId, title, time, location, day)
             }
 
             // Window parameters for overlay
@@ -268,9 +333,20 @@ class AlarmForegroundService : Service() {
             // Stop the alarm sound and vibration
             stopAlarmSound()
             
-            // Remove overlay
-            if (::overlayView.isInitialized) {
-                windowManager.removeView(overlayView)
+            // Remove overlay - ensure it's removed properly
+            try {
+                if (::overlayView.isInitialized) {
+                    windowManager.removeView(overlayView)
+                }
+            } catch (e: Exception) {
+                // If overlay removal fails, try again
+                try {
+                    if (::overlayView.isInitialized) {
+                        windowManager.removeView(overlayView)
+                    }
+                } catch (e2: Exception) {
+                    e2.printStackTrace()
+                }
             }
             
             // Send broadcast to notify Flutter about alarm state change
@@ -284,22 +360,36 @@ class AlarmForegroundService : Service() {
             e.printStackTrace()
         }
         
-        if (wakeLock.isHeld) {
-            wakeLock.release()
+        // Ensure wake lock is released
+        try {
+            if (wakeLock.isHeld) {
+                wakeLock.release()
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
         
-        stopForeground(true)
-        stopSelf()
+        // Stop the service
+        try {
+            stopForeground(true)
+            stopSelf()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
-    private fun snoozeAlarm(alarmId: Int = 0) {
+    private fun snoozeAlarm(alarmId: Int = 0, alarmTitle: String = "", alarmTime: String = "", alarmLocation: String = "", alarmDay: String = "") {
         try {
             // Stop current alarm sound and vibration
             stopAlarmSound()
             
             // Hide overlay temporarily
-            if (::overlayView.isInitialized) {
-                windowManager.removeView(overlayView)
+            try {
+                if (::overlayView.isInitialized) {
+                    windowManager.removeView(overlayView)
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
             
             // Send broadcast to notify Flutter about alarm state change
@@ -307,24 +397,25 @@ class AlarmForegroundService : Service() {
                 val intent = Intent("ALARM_STATE_CHANGED")
                 intent.putExtra("alarm_id", alarmId)
                 intent.putExtra("state", "snoozed")
+                intent.putExtra("snooze_minutes", 5) // Default 5 minutes snooze
+                intent.putExtra("alarm_title", alarmTitle)
+                intent.putExtra("alarm_time", alarmTime)
+                intent.putExtra("alarm_location", alarmLocation)
+                intent.putExtra("alarm_day", alarmDay)
                 sendBroadcast(intent)
             }
             
-            // Schedule to show again in 5 minutes
-            Handler(Looper.getMainLooper()).postDelayed({
-                if (wakeLock.isHeld) {
-                    // Restart alarm
-                    startAlarm()
-                    showAlarmOverlay(
-                        "Lecture Reminder",
-                        "Snoozed",
-                        "Location",
-                        "Today",
-                        alarmId
-                    )
-                }
-            }, 5 * 60 * 1000) // 5 minutes
+            // Don't schedule snooze here - let Flutter handle it
+            // Flutter will schedule the next alarm based on snooze settings
             
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        
+        // Stop the service - Flutter will handle the next alarm
+        try {
+            stopForeground(true)
+            stopSelf()
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -338,27 +429,44 @@ class AlarmForegroundService : Service() {
             // Stop alarm
             stopAlarmSound()
             
-            // Remove overlay
-            if (::overlayView.isInitialized) {
-                windowManager.removeView(overlayView)
+            // Remove overlay - ensure it's removed
+            try {
+                if (::overlayView.isInitialized) {
+                    windowManager.removeView(overlayView)
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
             
             // Release MediaPlayer
-            if (::mediaPlayer.isInitialized) {
-                mediaPlayer.release()
+            try {
+                if (::mediaPlayer.isInitialized) {
+                    mediaPlayer.release()
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
             
             // Clean up audio focus listener
-            audioFocusChangeListener?.let { listener ->
-                audioManager.abandonAudioFocus(listener)
+            try {
+                audioFocusChangeListener?.let { listener ->
+                    audioManager.abandonAudioFocus(listener)
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
             
         } catch (e: Exception) {
             e.printStackTrace()
         }
         
-        if (wakeLock.isHeld) {
-            wakeLock.release()
+        // Ensure wake lock is released
+        try {
+            if (wakeLock.isHeld) {
+                wakeLock.release()
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
     }
 }

@@ -1,4 +1,5 @@
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:lecture_reminder_system/model/alarm_model.dart';
 import 'package:lecture_reminder_system/core/services/alarm_service.dart';
 import 'package:lecture_reminder_system/core/services/alarm_state_service.dart';
@@ -11,6 +12,17 @@ class OverlayAlarmService {
   /// Start the alarm overlay service that appears over other apps
   Future<void> startAlarmOverlay(Alarm alarm) async {
     try {
+      // Check if app is active - if so, don't start native overlay
+      final isAppActive =
+          WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
+
+      if (isAppActive) {
+        print(
+          '🔔 App is active - not starting native overlay for: ${alarm.title}',
+        );
+        return;
+      }
+
       // Set alarm state to ringing
       _alarmStateService.setAlarmState(alarm.hashCode, AlarmState.ringing);
 
@@ -35,6 +47,7 @@ class OverlayAlarmService {
   /// Schedule a native alarm that will work even when app is closed
   Future<void> scheduleNativeAlarm(Alarm alarm, DateTime triggerTime) async {
     try {
+      // Always schedule native alarm - it will decide at execution time whether to show
       await _channel.invokeMethod('scheduleNativeAlarm', {
         'alarm_title': alarm.title,
         'alarm_time': alarm.time,
@@ -78,9 +91,24 @@ class OverlayAlarmService {
   Future<void> stopSpecificAlarm(Alarm alarm) async {
     try {
       await _channel.invokeMethod('stopAlarmOverlay');
-      // Set alarm state to stopped
-      _alarmStateService.setAlarmState(alarm.hashCode, AlarmState.stopped);
-      print('🔕 Alarm ${alarm.title} stopped');
+      // Completely stop the alarm (including snooze)
+      _alarmStateService.stopAlarmCompletely(alarm.hashCode);
+      print('🔕 Alarm ${alarm.title} completely stopped and snooze cancelled');
+    } catch (e) {
+      print('❌ Failed to stop alarm: $e');
+      await _alarmService.stopAlarm();
+    }
+  }
+
+  /// Stop a snoozed alarm and ensure snooze ends
+  Future<void> stopSnoozedAlarm(Alarm alarm) async {
+    try {
+      await _channel.invokeMethod('stopAlarmOverlay');
+      // Completely stop the alarm (including snooze)
+      _alarmStateService.stopAlarmCompletely(alarm.hashCode);
+      print(
+        '🔕 Snoozed alarm ${alarm.title} completely stopped and snooze cancelled',
+      );
     } catch (e) {
       print('❌ Failed to stop alarm: $e');
       await _alarmService.stopAlarm();
@@ -102,9 +130,14 @@ class OverlayAlarmService {
   Future<void> snoozeSpecificAlarm(Alarm alarm) async {
     try {
       await _channel.invokeMethod('snoozeAlarmOverlay');
-      // Set alarm state to snoozed
-      _alarmStateService.setAlarmState(alarm.hashCode, AlarmState.snoozed);
-      print('⏰ Alarm ${alarm.title} snoozed');
+      // Handle snooze through state service
+      _alarmStateService.snoozeAlarm(
+        alarm.hashCode,
+        alarm.settings.snoozeInterval.minutes,
+      );
+      print(
+        '⏰ Alarm ${alarm.title} snoozed for ${alarm.settings.snoozeInterval.minutes} minutes',
+      );
     } catch (e) {
       print('❌ Failed to snooze alarm: $e');
       await _alarmService.snoozeAlarm();
